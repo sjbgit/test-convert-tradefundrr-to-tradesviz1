@@ -1,0 +1,83 @@
+#!/usr/bin/env python3
+"""
+Convert TradeFundrr round-trip exports into the TradesViz Custom format.
+Usage:
+    pip install pandas
+    python tradefundrr_to_tradesviz_custom.py input.csv output.csv
+"""
+import argparse
+import re
+import pandas as pd
+
+REQUIRED = [
+    "Trade Id", "Contract", "Quantity", "Entry Date/Time",
+    "Entry Price", "Exit Date/Time", "Exit Price", "Commissions"
+]
+
+def format_option_symbol(contract):
+    value = str(contract).strip().upper()
+    match = re.fullmatch(r"\\.?([A-Z]+)(\\d{6})([CP])(\\d+(?:\\.\\d+)?)", value)
+    if not match:
+        raise ValueError(f"Unsupported contract format: {contract}")
+    underlying, expiry, cp, strike = match.groups()
+    expiry_date = pd.to_datetime(expiry, format="%y%m%d")
+    strike_num = float(strike)
+    strike_text = f"{strike_num:.1f}" if strike_num.is_integer() else str(strike_num)
+    return f"{underlying} {expiry_date.strftime('%d%b%y').upper()} {strike_text} {cp}"
+
+def convert(input_file, output_file):
+    df = pd.read_csv(input_file, sep=None, engine="python")
+    missing = [c for c in REQUIRED if c not in df.columns]
+    if missing:
+        raise ValueError(f"Missing required columns: {missing}")
+
+    rows = []
+    for _, trade in df.iterrows():
+        qty = float(trade["Quantity"])
+        if qty == 0:
+            raise ValueError(f"Trade {trade['Trade Id']} has zero quantity")
+
+        symbol = format_option_symbol(trade["Contract"])
+        entry_dt = pd.to_datetime(trade["Entry Date/Time"], errors="raise")
+        exit_dt = pd.to_datetime(trade["Exit Date/Time"], errors="raise")
+        commission = abs(float(trade["Commissions"])) / 2.0
+        pnl = ""
+        if "Net PnL" in df.columns and pd.notna(trade["Net PnL"]):
+            pnl = f" | TradeFundrr Net PnL: {float(trade['Net PnL']):.2f}"
+
+        common = {
+            "symbol": symbol,
+            "asset_type": "stock_option",
+            "currency": "USD",
+            "commission": commission,
+            "tags": "TradeFundrr",
+        }
+        trade_id = str(trade["Trade Id"])
+        rows.append({
+            "date": entry_dt.strftime("%Y%m%d"),
+            "time": entry_dt.strftime("%H:%M:%S"),
+            **common,
+            "price": float(trade["Entry Price"]),
+            "quantity": qty,
+            "notes": f"TradeFundrr Trade ID: {trade_id} | Opening execution{pnl}",
+        })
+        rows.append({
+            "date": exit_dt.strftime("%Y%m%d"),
+            "time": exit_dt.strftime("%H:%M:%S"),
+            **common,
+            "price": float(trade["Exit Price"]),
+            "quantity": -qty,
+            "notes": f"TradeFundrr Trade ID: {trade_id} | Closing execution{pnl}",
+        })
+
+    columns = ["date", "time", "symbol", "asset_type", "price", "currency",
+               "quantity", "commission", "tags", "notes"]
+    pd.DataFrame(rows, columns=columns).to_csv(output_file, index=False)
+    print(f"Converted {len(df)} round-trip trades into {len(rows)} execution rows.")
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("input_csv")
+    parser.add_argument("output_csv")
+    args = parser.parse_args()
+    convert(args.input_csv, args.output_csv)

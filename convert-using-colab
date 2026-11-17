@@ -1,0 +1,243 @@
+# ============================================================
+# TRADEFUNDRR TO TRADESVIZ CONVERTER
+# Google Colab Edition - https://colab.research.google.com/drive/1PPNh6jjDwz4HDA4dTF_Ftlqk-aBif89M
+# Output: TradesViz Custom format (one execution per row) 
+# ============================================================ 
+
+import pandas as pd
+import re
+from google.colab import files
+
+# ------------------------------------------------------------
+# STEP 1: Upload TradeFundrr CSV
+# ------------------------------------------------------------
+
+print("Please upload your TradeFundrr CSV file...")
+uploaded = files.upload()
+
+if not uploaded:
+    raise ValueError("No file uploaded.")
+
+input_file = list(uploaded.keys())[0]
+
+print(f"\nUploaded: {input_file}")
+
+# ------------------------------------------------------------
+# STEP 2: Read source CSV
+# ------------------------------------------------------------
+
+df = pd.read_csv(input_file, sep=None, engine="python")
+
+# Clean column names
+df.columns = df.columns.str.strip()
+
+required_columns = [
+    "Trade Id",
+    "Contract",
+    "Quantity",
+    "Entry Date/Time",
+    "Entry Price",
+    "Exit Date/Time",
+    "Exit Price",
+    "Net PnL",
+    "Commissions"
+]
+
+missing = [
+    col for col in required_columns
+    if col not in df.columns
+]
+
+if missing:
+    raise ValueError(
+        f"Missing required columns: {missing}"
+    )
+
+print(f"Source trades found: {len(df)}")
+
+# ------------------------------------------------------------
+# STEP 3: Convert option symbols
+# ------------------------------------------------------------
+
+def convert_symbol(contract):
+
+    match = re.fullmatch(
+        r"\.?([A-Z]+)(\d{6})([CP])(\d+(?:\.\d+)?)",
+        str(contract).strip().upper()
+    )
+
+    if not match:
+        raise ValueError(
+            f"Unsupported option contract: {contract}"
+        )
+
+    root, expiry, option_type, strike = match.groups()
+
+    expiry_date = pd.to_datetime(
+        expiry,
+        format="%y%m%d"
+    )
+
+    strike_number = float(strike)
+
+    strike_text = (
+        f"{strike_number:.1f}"
+        if strike_number.is_integer()
+        else str(strike_number)
+    )
+
+    return (
+        f"{root} "
+        f"{expiry_date.strftime('%d%b%y').upper()} "
+        f"{strike_text} "
+        f"{option_type}"
+    )
+
+# ------------------------------------------------------------
+# STEP 4: Convert round-trip trades to executions
+# ------------------------------------------------------------
+
+output_rows = []
+
+for _, trade in df.iterrows():
+
+    quantity = float(trade["Quantity"])
+
+    if quantity == 0:
+        raise ValueError(
+            f"Zero quantity for Trade ID {trade['Trade Id']}"
+        )
+
+    symbol = convert_symbol(trade["Contract"])
+
+    entry_date = pd.to_datetime(
+        trade["Entry Date/Time"],
+        errors="raise"
+    )
+
+    exit_date = pd.to_datetime(
+        trade["Exit Date/Time"],
+        errors="raise"
+    )
+
+    entry_price = float(trade["Entry Price"])
+    exit_price = float(trade["Exit Price"])
+
+    total_commission = abs(
+        float(trade["Commissions"])
+    )
+
+    commission_per_execution = (
+        total_commission / 2
+    )
+
+    trade_id = str(trade["Trade Id"])
+
+    net_pnl = float(trade["Net PnL"])
+
+    common = {
+        "symbol": symbol,
+        "asset_type": "stock_option",
+        "currency": "USD",
+        "commission": commission_per_execution,
+        "tags": "TradeFundrr"
+    }
+
+    # Opening execution
+    output_rows.append({
+        "date": entry_date.strftime("%Y%m%d"),
+        "time": entry_date.strftime("%H:%M:%S"),
+        **common,
+        "price": entry_price,
+        "quantity": quantity,
+        "notes": (
+            f"Trade ID {trade_id} | Opening execution | "
+            f"TradeFundrr Net PnL: {net_pnl:.2f}"
+        )
+    })
+
+    # Closing execution
+    output_rows.append({
+        "date": exit_date.strftime("%Y%m%d"),
+        "time": exit_date.strftime("%H:%M:%S"),
+        **common,
+        "price": exit_price,
+        "quantity": -quantity,
+        "notes": (
+            f"Trade ID {trade_id} | Closing execution | "
+            f"TradeFundrr Net PnL: {net_pnl:.2f}"
+        )
+    })
+
+# ------------------------------------------------------------
+# STEP 5: Create TradesViz Custom CSV
+# ------------------------------------------------------------
+
+output_columns = [
+    "date",
+    "time",
+    "symbol",
+    "asset_type",
+    "price",
+    "currency",
+    "quantity",
+    "commission",
+    "tags",
+    "notes"
+]
+
+output_df = pd.DataFrame(
+    output_rows,
+    columns=output_columns
+)
+
+# ------------------------------------------------------------
+# STEP 6: Validate output
+# ------------------------------------------------------------
+
+assert len(output_df) == len(df) * 2
+
+assert output_df["commission"].notna().all()
+
+assert output_df["price"].notna().all()
+
+assert output_df["quantity"].notna().all()
+
+# Check that total commissions are preserved
+source_commissions = df["Commissions"].abs().sum()
+output_commissions = output_df["commission"].sum()
+
+assert abs(
+    source_commissions - output_commissions
+) < 0.000001
+
+# ------------------------------------------------------------
+# STEP 7: Export and download
+# ------------------------------------------------------------
+
+output_file = (
+    input_file.rsplit(".", 1)[0]
+    + "_TRADESVIZ_CUSTOM.csv"
+)
+
+output_df.to_csv(
+    output_file,
+    index=False
+)
+
+print("\n====================================")
+print("CONVERSION COMPLETE")
+print("====================================")
+
+print(f"Original trades: {len(df)}")
+print(f"Execution rows: {len(output_df)}")
+print(f"Total commissions: ${output_commissions:.2f}")
+
+print("\nFirst 5 output rows:")
+display(output_df.head())
+
+print("\nDownloading converted TradesViz CSV...")
+
+files.download(output_file)
+
+print("\nDone!")
